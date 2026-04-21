@@ -3,3 +3,7 @@ data/**
 
 data/art/**
 !data/art/.gitkeep
+
+
+**/__pycache__
+.env
