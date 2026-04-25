@@ -33,7 +33,7 @@ from tqdm import tqdm
 
 from .model import LightingClassifier
 
-load_dotenv()
+load_dotenv(override=True)
 
 log = logging.getLogger(__name__)
 

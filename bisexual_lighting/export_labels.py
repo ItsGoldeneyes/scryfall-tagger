@@ -27,7 +27,7 @@ from botocore.client import Config
 from dotenv import load_dotenv
 from tqdm import tqdm
 
-load_dotenv()
+load_dotenv(override=True)
 
 log = logging.getLogger(__name__)
 

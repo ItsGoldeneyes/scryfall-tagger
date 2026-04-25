@@ -26,7 +26,7 @@ from sklearn.model_selection import train_test_split
 
 from .model import LightingClassifier
 
-load_dotenv()
+load_dotenv(override=True)
 
 log = logging.getLogger(__name__)
 

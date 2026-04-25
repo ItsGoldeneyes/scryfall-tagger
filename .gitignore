@@ -16,3 +16,9 @@ data/bisexual_lighting/
 
 # venv
 .venv/
+
+# Label Studio auth token
+.ls_session
+
+# Data export
+export.json

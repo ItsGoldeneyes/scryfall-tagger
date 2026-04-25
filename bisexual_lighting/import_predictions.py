@@ -25,9 +25,9 @@ import requests
 from dotenv import load_dotenv
 from tqdm import tqdm
 
-from ._auth import get_auth_header
+from ._auth import make_session
 
-load_dotenv()
+load_dotenv(override=True)
 
 log = logging.getLogger(__name__)
 
@@ -100,8 +100,7 @@ def main() -> None:
 
     log.info("Importing %d predictions (overwrite=%s)...", len(rows), args.overwrite)
 
-    session = requests.Session()
-    session.headers["Authorization"] = get_auth_header()
+    session = make_session()
 
     ok = fail = 0
     for row in tqdm(rows, desc="Importing"):
