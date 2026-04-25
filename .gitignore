@@ -7,3 +7,12 @@ data/art/**
 
 **/__pycache__
 .env
+.claude
+
+# ML artifacts
+models/
+predictions.csv
+data/bisexual_lighting/
+
+# venv
+.venv/
