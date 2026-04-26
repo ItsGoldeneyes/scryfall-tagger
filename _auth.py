@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-SESSION_FILE = Path(__file__).resolve().parent.parent / ".ls_session"
+SESSION_FILE = Path(__file__).resolve().parent / ".ls_session"
 
 
 def make_session():

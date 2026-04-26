@@ -5,8 +5,8 @@ Uses the Snapshot API (3-step: create → poll → download) to get a JSON
 export of all tasks including annotations and predictions.
 
 Usage:
-  python -m bisexual_lighting.snapshot_export
-  python -m bisexual_lighting.snapshot_export --out my_export.json
+    python snapshot_export.py
+    python snapshot_export.py --out my_export.json
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from ._auth import make_session
+from _auth import make_session
 
 load_dotenv(override=True)
 
@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 LS_URL = os.environ["LABEL_STUDIO_URL"]
 PROJECT_ID = os.environ["LABEL_STUDIO_PROJECT_ID"]
 
-DEFAULT_OUT = Path(__file__).resolve().parent.parent / "export.json"
+DEFAULT_OUT = Path(__file__).resolve().parent / "export.json"
 POLL_INTERVAL = 3  # seconds between status checks
 MAX_WAIT = 300     # give up after 5 minutes
 

@@ -8,7 +8,7 @@ Training is two-phase to prevent overfitting on the small dataset:
 Best model (by val accuracy) is saved to models/lighting_classifier.pt.
 
 Usage:
-  python -m bisexual_lighting.train
+    python train.py
 """
 
 from __future__ import annotations
@@ -24,14 +24,14 @@ from torchvision import datasets, transforms
 from dotenv import load_dotenv
 from sklearn.model_selection import train_test_split
 
-from .model import LightingClassifier
+from model import LightingClassifier
 
 load_dotenv(override=True)
 
 log = logging.getLogger(__name__)
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "bisexual_lighting"
-MODEL_DIR = Path(__file__).resolve().parent.parent / "models"
+DATA_DIR = Path(__file__).resolve().parent / "data" / "bisexual_lighting"
+MODEL_DIR = Path(__file__).resolve().parent / "models"
 MODEL_PATH = MODEL_DIR / "lighting_classifier.pt"
 
 PHASE1_EPOCHS = int(os.environ.get("TRAIN_PHASE1_EPOCHS", "10"))
@@ -67,6 +67,7 @@ def run_epoch(
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer | None,
     device: torch.device,
+    scaler: torch.amp.GradScaler | None = None,
 ) -> tuple[float, float]:
     """Run one epoch. If optimizer is None, runs in eval mode (no grad)."""
     training = optimizer is not None
@@ -77,14 +78,20 @@ def run_epoch(
 
     with ctx:
         for images, labels in loader:
-            images, labels = images.to(device), labels.to(device)
-            logits = model(images)
-            loss = criterion(logits, labels)
+            images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+            with torch.autocast(device_type=device.type, enabled=device.type == "cuda"):
+                logits = model(images)
+                loss = criterion(logits, labels)
 
             if training:
                 optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    optimizer.step()
 
             total_loss += loss.item()
             correct += (logits.argmax(1) == labels).sum().item()
@@ -120,13 +127,17 @@ def main() -> None:
         Subset(train_dataset, train_idx),
         batch_size=BATCH_SIZE,
         sampler=sampler,
-        num_workers=0,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
     )
     val_loader = DataLoader(
         Subset(val_dataset, val_idx),
         batch_size=BATCH_SIZE,
         shuffle=False,
-        num_workers=0,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
     )
 
     # Class-weighted loss as a second guard against imbalance
@@ -137,6 +148,7 @@ def main() -> None:
     criterion = nn.CrossEntropyLoss(weight=class_weights)
 
     model = LightingClassifier().to(device)
+    scaler = torch.amp.GradScaler() if device.type == "cuda" else None
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     best_val_acc = 0.0
 
@@ -149,8 +161,8 @@ def main() -> None:
     optimizer = torch.optim.Adam(model.backbone.fc.parameters(), lr=1e-3)
 
     for epoch in range(1, PHASE1_EPOCHS + 1):
-        train_loss, _ = run_epoch(model, train_loader, criterion, optimizer, device)
-        _, val_acc = run_epoch(model, val_loader, criterion, None, device)
+        train_loss, _ = run_epoch(model, train_loader, criterion, optimizer, device, scaler)
+        _, val_acc = run_epoch(model, val_loader, criterion, None, device, scaler)
         log.info("P1 epoch %2d/%d  loss=%.4f  val_acc=%.4f", epoch, PHASE1_EPOCHS, train_loss, val_acc)
 
         if val_acc > best_val_acc:
@@ -166,8 +178,8 @@ def main() -> None:
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=PHASE2_EPOCHS)
 
     for epoch in range(1, PHASE2_EPOCHS + 1):
-        train_loss, _ = run_epoch(model, train_loader, criterion, optimizer, device)
-        _, val_acc = run_epoch(model, val_loader, criterion, None, device)
+        train_loss, _ = run_epoch(model, train_loader, criterion, optimizer, device, scaler)
+        _, val_acc = run_epoch(model, val_loader, criterion, None, device, scaler)
         scheduler.step()
         log.info("P2 epoch %2d/%d  loss=%.4f  val_acc=%.4f", epoch, PHASE2_EPOCHS, train_loss, val_acc)
 

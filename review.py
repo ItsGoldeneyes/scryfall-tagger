@@ -6,7 +6,7 @@ Refreshes data/unique_artwork.json from the Scryfall bulk-data API before
 iterating so the set/collector-number lookup is always current.
 
 Usage:
-  python -m bisexual_lighting.review export.json
+    python review.py export.json
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from tools.scryfall_tools import build_session, get_uris, SF_API_HEADERS
 
 log = logging.getLogger(__name__)
 
-DATA_PATH = Path(__file__).resolve().parent.parent / "data"
+DATA_PATH = Path(__file__).resolve().parent / "data"
 ARTWORK_PATH = DATA_PATH / "unique_artwork.json"
 TARGET_LABELS = {"bisexual lighting", "yes"}
 
@@ -75,7 +75,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     if len(sys.argv) < 2:
-        log.error("Usage: python -m bisexual_lighting.review <export.json>")
+        log.error("Usage: python review.py <export.json>")
         sys.exit(1)
 
     export_path = Path(sys.argv[1])

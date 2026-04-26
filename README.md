@@ -1,24 +1,58 @@
-# magic_classifier
-A utility for classifying Magic: The Gathering cards
+# scryfall-tagger
 
-## CLI
+Utilities for a bisexual lighting labeling workflow on Magic: The Gathering art.
 
-Run the command-line entry point with:
+## Repository Structure
+
+- Root scripts: Label Studio export/import helpers plus train/predict pipeline.
+- tools/: shared Scryfall utility helpers.
+- data/: local data storage (`.gitkeep` is committed; generated data is ignored).
+
+## Main Workflow
+
+1. Log in to Label Studio and save a session cookie:
 
 ```bash
-python card_classifier.py --help
+python get_ls_token.py
 ```
 
-The `-d` / `--data` argument points at the data directory and defaults to `./data`.
-Use `-r` / `--refresh` to download the Scryfall bulk data and image cache into that directory.
-Use `-c` / `--classify-image` to classify a single image and write tag IDs into the mappings file.
-Use `--classify-all` to classify all `*.jpg` files in `data/art`.
-Use `-m` / `--mappings` to override the default mappings filename (`color_mappings.v1.json`).
-Use `--dry-run` with classification flags to preview predictions without writing mapping changes.
+2. Export project tasks from Label Studio (or use an existing export):
 
+```bash
+python snapshot_export.py
+```
+
+3. Download labeled images into local training folders:
+
+```bash
+python export_labels.py export.json
+```
+
+4. Train the classifier:
+
+```bash
+python train.py
+```
+
+5. Score unlabeled tasks with uncertainty ranking:
+
+```bash
+python predict.py export.json
+```
+
+6. Import predictions back into Label Studio:
+
+```bash
+python import_predictions.py
+```
+
+Optional review helper:
+
+```bash
+python review.py export.json
+```
 
 ## Requirements
+
 - Python 3.9 or higher
-- OpenCV
-- requests
-- numpy
+- See `requirements.txt`

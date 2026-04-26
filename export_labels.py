@@ -9,7 +9,7 @@ How to get the export file:
   Label Studio → your project → Export → JSON → save as e.g. export.json
 
 Usage:
-  python -m bisexual_lighting.export_labels export.json
+    python export_labels.py export.json
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ MINIO_SECRET_KEY = os.environ["MINIO_SECRET_KEY"]
 MINIO_BUCKET = os.environ["MINIO_BUCKET"]
 POSITIVE_LABEL = os.environ.get("POSITIVE_LABEL", "Yes")
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "bisexual_lighting"
+DATA_DIR = Path(__file__).resolve().parent / "data" / "bisexual_lighting"
 
 
 def get_s3_client():
@@ -77,7 +77,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     if len(sys.argv) < 2:
-        log.error("Usage: python -m bisexual_lighting.export_labels <export.json>")
+        log.error("Usage: python export_labels.py <export.json>")
         log.error("Export JSON from Label Studio: Project → Export → JSON")
         sys.exit(1)
 

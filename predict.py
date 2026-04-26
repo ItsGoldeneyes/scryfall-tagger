@@ -9,7 +9,7 @@ How to get the export file:
   (export ALL tasks, not just labeled ones)
 
 Usage:
-  python -m bisexual_lighting.predict export.json
+    python predict.py export.json
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -31,7 +32,7 @@ from PIL import Image
 from torchvision import transforms
 from tqdm import tqdm
 
-from .model import LightingClassifier
+from model import LightingClassifier
 
 load_dotenv(override=True)
 
@@ -42,9 +43,11 @@ MINIO_ACCESS_KEY = os.environ["MINIO_ACCESS_KEY"]
 MINIO_SECRET_KEY = os.environ["MINIO_SECRET_KEY"]
 MINIO_BUCKET = os.environ["MINIO_BUCKET"]
 MC_PASSES = int(os.environ.get("MC_PASSES", "20"))
+PREDICT_BATCH_SIZE = int(os.environ.get("PREDICT_BATCH_SIZE", "64"))
+PREDICT_WORKERS = int(os.environ.get("PREDICT_WORKERS", "8"))
 
-MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "lighting_classifier.pt"
-OUTPUT_PATH = Path(__file__).resolve().parent.parent / "predictions.csv"
+MODEL_PATH = Path(__file__).resolve().parent / "models" / "lighting_classifier.pt"
+OUTPUT_PATH = Path(__file__).resolve().parent / "predictions.csv"
 
 # ImageFolder sorts classes alphabetically: no=0, yes=1
 LABELS = ["no", "yes"]
@@ -88,7 +91,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     if len(sys.argv) < 2:
-        log.error("Usage: python -m bisexual_lighting.predict <export.json>")
+        log.error("Usage: python predict.py <export.json>")
         log.error("Export JSON from Label Studio: Project → Export → JSON")
         sys.exit(1)
 
@@ -117,28 +120,54 @@ def main() -> None:
     rows: list[dict] = []
     failed = 0
 
-    for task in tqdm(unlabeled, desc="Scoring"):
+    def fetch(task: dict) -> tuple[dict, torch.Tensor | None]:
         image_url = task["data"].get("image", "")
         if not image_url:
-            failed += 1
-            continue
+            return task, None
         try:
             s3_key = extract_s3_key(image_url)
             image = load_image(s3, s3_key)
-            tensor = INFERENCE_TRANSFORMS(image).unsqueeze(0).to(device)
-            mean_probs, uncertainty = model.predict_with_uncertainty(tensor, n_passes=MC_PASSES)
-            pred_idx = mean_probs.argmax(1).item()
-            confidence = mean_probs[0, pred_idx].item()
+            return task, INFERENCE_TRANSFORMS(image)
+        except Exception as exc:
+            log.warning("Task %s failed to fetch: %s", task.get("id"), exc)
+            return task, None
+
+    # Process in batches: download PREDICT_WORKERS images in parallel, then infer as a batch
+    batch_tasks: list[dict] = []
+    batch_tensors: list[torch.Tensor] = []
+
+    def flush_batch() -> None:
+        nonlocal failed
+        if not batch_tensors:
+            return
+        batch = torch.stack(batch_tensors).to(device, non_blocking=True)
+        mean_probs, uncertainties = model.predict_with_uncertainty(batch, n_passes=MC_PASSES)
+        for i, task in enumerate(batch_tasks):
+            s3_key = extract_s3_key(task["data"]["image"])
+            pred_idx = mean_probs[i].argmax().item()
             rows.append({
                 "task_id": task["id"],
                 "image": Path(s3_key).name,
                 "predicted_label": LABELS[pred_idx],
-                "confidence": round(confidence, 4),
-                "uncertainty": round(uncertainty[0].item(), 6),
+                "confidence": round(mean_probs[i, pred_idx].item(), 4),
+                "uncertainty": round(uncertainties[i].item(), 6),
             })
-        except Exception as exc:
-            log.warning("Task %s failed: %s", task.get("id"), exc)
-            failed += 1
+        batch_tasks.clear()
+        batch_tensors.clear()
+
+    with ThreadPoolExecutor(max_workers=PREDICT_WORKERS) as pool:
+        futures = {pool.submit(fetch, t): t for t in unlabeled}
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Scoring"):
+            task, tensor = future.result()
+            if tensor is None:
+                failed += 1
+                continue
+            batch_tasks.append(task)
+            batch_tensors.append(tensor)
+            if len(batch_tensors) >= PREDICT_BATCH_SIZE:
+                flush_batch()
+
+    flush_batch()
 
     # Sort by uncertainty descending — label these first
     rows.sort(key=lambda r: r["uncertainty"], reverse=True)

@@ -9,8 +9,8 @@ If a task already has a prediction from this model version, it is skipped.
 Pass --overwrite to replace existing predictions instead.
 
 Usage:
-  python -m bisexual_lighting.import_predictions
-  python -m bisexual_lighting.import_predictions --overwrite
+    python import_predictions.py
+    python import_predictions.py --overwrite
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import requests
 from dotenv import load_dotenv
 from tqdm import tqdm
 
-from ._auth import make_session
+from _auth import make_session
 
 load_dotenv(override=True)
 
@@ -37,7 +37,7 @@ CHOICE_FROM_NAME = os.environ.get("LS_CHOICE_FROM_NAME", "choice")
 CHOICE_TO_NAME = os.environ.get("LS_CHOICE_TO_NAME", "image")
 MODEL_VERSION = "resnet18_v1"
 
-PREDICTIONS_PATH = Path(__file__).resolve().parent.parent / "predictions.csv"
+PREDICTIONS_PATH = Path(__file__).resolve().parent / "predictions.csv"
 
 # Maps our internal labels back to Label Studio choice values
 LABEL_MAP = {"yes": POSITIVE_LABEL, "no": "No"}

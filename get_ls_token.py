@@ -67,7 +67,7 @@ if __name__ == "__main__":
         projects = r.json()
         count = len(projects.get("results", projects))
         print(f"Auth verified — {count} project(s) visible.")
-        print("You can now run: python -m bisexual_lighting.snapshot_export")
+        print("You can now run: python snapshot_export.py")
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)
         sys.exit(1)
