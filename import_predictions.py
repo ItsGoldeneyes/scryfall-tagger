@@ -19,6 +19,7 @@ import argparse
 import csv
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
@@ -95,23 +96,32 @@ def main() -> None:
         log.error("predictions.csv not found — run predict.py first.")
         return
 
-    with open(PREDICTIONS_PATH, newline="") as f:
+    with open(PREDICTIONS_PATH, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
 
     log.info("Importing %d predictions (overwrite=%s)...", len(rows), args.overwrite)
 
     session = make_session()
 
-    ok = fail = 0
-    for row in tqdm(rows, desc="Importing"):
+    def process(row: dict) -> bool:
         label = LABEL_MAP.get(row["predicted_label"], row["predicted_label"])
-        confidence = float(row["confidence"])
         try:
-            push_prediction(session, int(row["task_id"]), label, confidence, args.overwrite)
-            ok += 1
+            push_prediction(session, int(row["task_id"]), label, float(row["confidence"]), args.overwrite)
+            return True
         except Exception as exc:
             log.warning("Task %s failed: %s", row["task_id"], exc)
-            fail += 1
+            return False
+
+    ok = fail = 0
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        futures = {pool.submit(process, row): row for row in rows}
+        with tqdm(total=len(rows), desc="Importing") as bar:
+            for future in as_completed(futures):
+                if future.result():
+                    ok += 1
+                else:
+                    fail += 1
+                bar.update(1)
 
     log.info("Done.  ok=%d  failed=%d", ok, fail)
     log.info(

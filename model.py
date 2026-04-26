@@ -24,17 +24,17 @@ class LightingClassifier(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """MC Dropout inference.
 
-        Runs n_passes forward passes with dropout active, then returns
-        (mean_probs, uncertainty) where uncertainty is the mean predictive
-        variance across classes — higher means the model is less sure.
+        Tiles the batch n_passes times and runs a single forward pass so the
+        GPU processes one large tensor instead of n_passes small ones.
+        Returns (mean_probs, uncertainty) where uncertainty is the summed
+        predictive variance across classes — higher means the model is less sure.
         """
         self.train()  # activates dropout
         with torch.no_grad():
-            probs = torch.stack(
-                [torch.softmax(self(x), dim=1) for _ in range(n_passes)]
-            )
+            B = x.shape[0]
+            logits = self(x.repeat(n_passes, 1, 1, 1))           # (n_passes*B, 2)
+            probs = torch.softmax(logits, dim=1).view(n_passes, B, -1)  # (n_passes, B, 2)
         self.eval()
         mean_probs = probs.mean(0)
-        # sum variance across class dimension so uncertainty is a scalar per image
         uncertainty = probs.var(0).sum(1)
         return mean_probs, uncertainty

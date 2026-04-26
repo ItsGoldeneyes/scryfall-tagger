@@ -20,6 +20,8 @@ import json
 import logging
 import os
 import sys
+import queue
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import urlparse
@@ -44,7 +46,7 @@ MINIO_SECRET_KEY = os.environ["MINIO_SECRET_KEY"]
 MINIO_BUCKET = os.environ["MINIO_BUCKET"]
 MC_PASSES = int(os.environ.get("MC_PASSES", "20"))
 PREDICT_BATCH_SIZE = int(os.environ.get("PREDICT_BATCH_SIZE", "64"))
-PREDICT_WORKERS = int(os.environ.get("PREDICT_WORKERS", "8"))
+PREDICT_WORKERS = int(os.environ.get("PREDICT_WORKERS", "16"))
 
 MODEL_PATH = Path(__file__).resolve().parent / "models" / "lighting_classifier.pt"
 OUTPUT_PATH = Path(__file__).resolve().parent / "predictions.csv"
@@ -66,7 +68,7 @@ def get_s3_client():
         endpoint_url=MINIO_ENDPOINT,
         aws_access_key_id=MINIO_ACCESS_KEY,
         aws_secret_access_key=MINIO_SECRET_KEY,
-        config=Config(signature_version="s3v4"),
+        config=Config(signature_version="s3v4", max_pool_connections=PREDICT_WORKERS),
         region_name="us-east-1",
     )
 
@@ -120,6 +122,14 @@ def main() -> None:
     rows: list[dict] = []
     failed = 0
 
+    # Prefetch queue holds pre-built batches; bounded to cap RAM usage.
+    # Each slot holds ~PREDICT_BATCH_SIZE * 224*224*3*4 bytes (~40MB at batch=256).
+    QUEUE_DEPTH = 8
+    batch_queue: queue.Queue = queue.Queue(maxsize=QUEUE_DEPTH)
+    _DONE = object()
+
+    fail_count = [0]  # mutable container so producer thread can write, main thread reads after join
+
     def fetch(task: dict) -> tuple[dict, torch.Tensor | None]:
         image_url = task["data"].get("image", "")
         if not image_url:
@@ -132,47 +142,61 @@ def main() -> None:
             log.warning("Task %s failed to fetch: %s", task.get("id"), exc)
             return task, None
 
-    # Process in batches: download PREDICT_WORKERS images in parallel, then infer as a batch
-    batch_tasks: list[dict] = []
-    batch_tensors: list[torch.Tensor] = []
+    def producer() -> None:
+        batch_t: list[dict] = []
+        batch_x: list[torch.Tensor] = []
 
-    def flush_batch() -> None:
-        nonlocal failed
-        if not batch_tensors:
-            return
-        batch = torch.stack(batch_tensors).to(device, non_blocking=True)
-        mean_probs, uncertainties = model.predict_with_uncertainty(batch, n_passes=MC_PASSES)
-        for i, task in enumerate(batch_tasks):
-            s3_key = extract_s3_key(task["data"]["image"])
-            pred_idx = mean_probs[i].argmax().item()
-            rows.append({
-                "task_id": task["id"],
-                "image": Path(s3_key).name,
-                "predicted_label": LABELS[pred_idx],
-                "confidence": round(mean_probs[i, pred_idx].item(), 4),
-                "uncertainty": round(uncertainties[i].item(), 6),
-            })
-        batch_tasks.clear()
-        batch_tensors.clear()
+        def flush() -> None:
+            if batch_x:
+                batch_queue.put((list(batch_t), torch.stack(batch_x)))
+                batch_t.clear()
+                batch_x.clear()
 
-    with ThreadPoolExecutor(max_workers=PREDICT_WORKERS) as pool:
-        futures = {pool.submit(fetch, t): t for t in unlabeled}
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Scoring"):
-            task, tensor = future.result()
-            if tensor is None:
-                failed += 1
-                continue
-            batch_tasks.append(task)
-            batch_tensors.append(tensor)
-            if len(batch_tensors) >= PREDICT_BATCH_SIZE:
-                flush_batch()
+        with ThreadPoolExecutor(max_workers=PREDICT_WORKERS) as pool:
+            futures = [pool.submit(fetch, t) for t in unlabeled]
+            for future in as_completed(futures):
+                task, tensor = future.result()
+                if tensor is None:
+                    fail_count[0] += 1
+                    continue
+                batch_t.append(task)
+                batch_x.append(tensor)
+                if len(batch_x) >= PREDICT_BATCH_SIZE:
+                    flush()
+        flush()
+        batch_queue.put(_DONE)
 
-    flush_batch()
+    producer_thread = threading.Thread(target=producer, daemon=True)
+    producer_thread.start()
+
+    with tqdm(total=len(unlabeled), desc="Scoring") as bar:
+        while True:
+            item = batch_queue.get()
+            if item is _DONE:
+                break
+            batch_t, batch = item
+            batch = batch.to(device, non_blocking=True)
+            with torch.autocast(device_type=device.type, enabled=device.type == "cuda"):
+                mean_probs, uncertainties = model.predict_with_uncertainty(batch, n_passes=MC_PASSES)
+            for i, task in enumerate(batch_t):
+                s3_key = extract_s3_key(task["data"]["image"])
+                pred_idx = mean_probs[i].argmax().item()
+                rows.append({
+                    "task_id": task["id"],
+                    "image": Path(s3_key).name,
+                    "predicted_label": LABELS[pred_idx],
+                    "confidence": round(mean_probs[i, pred_idx].item(), 4),
+                    "uncertainty": round(uncertainties[i].item(), 6),
+                })
+            bar.update(len(batch_t))
+
+    producer_thread.join()
+    failed = fail_count[0]
 
     # Sort by uncertainty descending — label these first
     rows.sort(key=lambda r: r["uncertainty"], reverse=True)
 
-    with open(OUTPUT_PATH, "w", newline="") as f:
+    with open(OUTPUT_PATH, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
             f, fieldnames=["task_id", "image", "predicted_label", "confidence", "uncertainty"]
         )
