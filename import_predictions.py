@@ -19,6 +19,7 @@ import argparse
 import csv
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -44,14 +45,37 @@ PREDICTIONS_PATH = Path(__file__).resolve().parent / "predictions.csv"
 LABEL_MAP = {"yes": POSITIVE_LABEL, "no": "No"}
 
 
+def fetch_already_imported(session: requests.Session) -> set[int]:
+    """Return task IDs that already have a prediction from MODEL_VERSION."""
+    imported: set[int] = set()
+    page = 1
+    while True:
+        resp = session.get(
+            f"{LS_URL}/api/predictions/",
+            params={"model_version": MODEL_VERSION, "page_size": 1000, "page": page},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("results", data) if isinstance(data, dict) else data
+        if not results:
+            break
+        for pred in results:
+            imported.add(pred["task"])
+        if not (isinstance(data, dict) and data.get("next")):
+            break
+        page += 1
+    return imported
+
+
 def delete_existing_predictions(session: requests.Session, task_id: int) -> None:
-    resp = session.get(f"{LS_URL}/api/predictions/", params={"task": task_id}, timeout=10)
+    resp = session.get(f"{LS_URL}/api/predictions/", params={"task": task_id}, timeout=30)
     resp.raise_for_status()
     data = resp.json()
     predictions = data.get("results", data) if isinstance(data, dict) else data
     for pred in predictions:
         if pred.get("model_version") == MODEL_VERSION:
-            session.delete(f"{LS_URL}/api/predictions/{pred['id']}/", timeout=10)
+            session.delete(f"{LS_URL}/api/predictions/{pred['id']}/", timeout=30)
 
 
 def push_prediction(
@@ -77,7 +101,7 @@ def push_prediction(
         "score": confidence,
         "model_version": MODEL_VERSION,
     }
-    resp = session.post(f"{LS_URL}/api/predictions/", json=payload, timeout=10)
+    resp = session.post(f"{LS_URL}/api/predictions/", json=payload, timeout=30)
     resp.raise_for_status()
 
 
@@ -99,21 +123,31 @@ def main() -> None:
     with open(PREDICTIONS_PATH, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
 
-    log.info("Importing %d predictions (overwrite=%s)...", len(rows), args.overwrite)
-
     session = make_session()
+
+    if not args.overwrite:
+        log.info("Fetching already-imported predictions to skip...")
+        already_imported = fetch_already_imported(session)
+        log.info("Found %d already imported — skipping them", len(already_imported))
+        rows = [r for r in rows if int(r["task_id"]) not in already_imported]
+
+    log.info("Importing %d predictions (overwrite=%s)...", len(rows), args.overwrite)
 
     def process(row: dict) -> bool:
         label = LABEL_MAP.get(row["predicted_label"], row["predicted_label"])
-        try:
-            push_prediction(session, int(row["task_id"]), label, float(row["confidence"]), args.overwrite)
-            return True
-        except Exception as exc:
-            log.warning("Task %s failed: %s", row["task_id"], exc)
-            return False
+        for attempt in range(3):
+            try:
+                push_prediction(session, int(row["task_id"]), label, float(row["confidence"]), args.overwrite)
+                return True
+            except Exception as exc:
+                if attempt == 2:
+                    log.warning("Task %s failed after 3 attempts: %s", row["task_id"], exc)
+                    return False
+                time.sleep(2 ** attempt)
+        return False
 
     ok = fail = 0
-    with ThreadPoolExecutor(max_workers=16) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         futures = {pool.submit(process, row): row for row in rows}
         with tqdm(total=len(rows), desc="Importing") as bar:
             for future in as_completed(futures):
